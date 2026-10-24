@@ -133,13 +133,24 @@ export default async function plugin(bb: BbPluginApi) {
   let cachedLocalHostId: string | null = null;
   async function getLocalHostId(): Promise<string | null> {
     if (cachedLocalHostId !== null) return cachedLocalHostId;
+    if (process.env.BB_HOST_ID) {
+      cachedLocalHostId = process.env.BB_HOST_ID;
+      return cachedLocalHostId;
+    }
+    try {
+      const auth = JSON.parse(await readFile("/home/decrux/.bb-machines/decrux.getbb.app/auth.json", "utf8"));
+      if (auth.hostId) {
+        cachedLocalHostId = auth.hostId;
+        return cachedLocalHostId;
+      }
+    } catch {}
     try {
       const { dataDir } = await bb.sdk.system.config();
       const val = (await readFile(path.join(dataDir, "host-id"), "utf8")).trim();
       if (val) cachedLocalHostId = val;
       return cachedLocalHostId;
     } catch {
-      return process.env.BB_HOST_ID ?? null;
+      return null;
     }
   }
 
@@ -269,9 +280,10 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`providerCliStatus failed for ${hostId}: ${e}`);
     }
 
-    // If local Linux host, probe deep system packages & developer runtimes
+    // If local Linux host or host_zzfkbj8hbd, probe deep system packages & developer runtimes
     const localId = await getLocalHostId();
-    if (hostId === localId || !hostId) {
+    const isThisHost = hostId === localId || hostId === "host_zzfkbj8hbd" || !hostId;
+    if (isThisHost) {
       const localTools: Array<{
         name: string;
         displayName: string;
@@ -460,9 +472,10 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`experimental_discoverRepos failed for ${hostId}: ${e}`);
     }
 
-    // 2. If local Linux host, scan workspace & Code directories for all git repos
+    // 2. If Linux host / Decrux host, scan workspace & Code directories for all git repos
     const localId = await getLocalHostId();
-    if (hostId === localId || !hostId) {
+    const isThisHost = hostId === localId || hostId === "host_zzfkbj8hbd" || !hostId;
+    if (isThisHost) {
       const scanRoots = ["/home/decrux/Code", "/home/decrux/projects", "/home/decrux"];
       for (const root of scanRoots) {
         if (!existsSync(root)) continue;

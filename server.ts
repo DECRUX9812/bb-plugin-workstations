@@ -129,7 +129,12 @@ export const rpcContract = defineRpcContract({
 export default async function plugin(bb: BbPluginApi) {
   bb.log.info("Workstations plugin loading");
 
-  // Cache local host ID
+  // Helper to determine if a host represents this Linux system
+  function isDecruxLinux(hostId?: string | null): boolean {
+    if (!hostId) return true;
+    const lower = hostId.toLowerCase();
+    return lower === "host_zzfkbj8hbd" || lower.includes("linux") || lower.includes("decrux");
+  }
   let cachedLocalHostId: string | null = null;
   async function getLocalHostId(): Promise<string | null> {
     if (cachedLocalHostId !== null) return cachedLocalHostId;
@@ -282,7 +287,7 @@ export default async function plugin(bb: BbPluginApi) {
 
     // If local Linux host or host_zzfkbj8hbd, probe deep system packages & developer runtimes
     const localId = await getLocalHostId();
-    const isThisHost = hostId === localId || hostId === "host_zzfkbj8hbd" || !hostId;
+    const isThisHost = isDecruxLinux(hostId) || (localId !== null && hostId === localId);
     if (isThisHost) {
       const localTools: Array<{
         name: string;
@@ -474,7 +479,7 @@ export default async function plugin(bb: BbPluginApi) {
 
     // 2. If Linux host / Decrux host, scan workspace & Code directories for all git repos
     const localId = await getLocalHostId();
-    const isThisHost = hostId === localId || hostId === "host_zzfkbj8hbd" || !hostId;
+    const isThisHost = isDecruxLinux(hostId) || (localId !== null && hostId === localId);
     if (isThisHost) {
       const scanRoots = ["/home/decrux/Code", "/home/decrux/projects", "/home/decrux"];
       for (const root of scanRoots) {

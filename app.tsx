@@ -1250,8 +1250,8 @@ export default definePluginApp((app) => {
     title: "Workstations",
     icon: "Server",
     component: () => <WorkstationsExplorer variant="panel" />,
-    run: ({ openTab }) => {
-      openTab();
+    run: ({ openPanel }) => {
+      openPanel({ title: "Workstations" });
     },
   });
 
@@ -1259,8 +1259,8 @@ export default definePluginApp((app) => {
   app.slots.commandPaletteAction({
     id: "open-workstations",
     title: "Workstations: Explore Files, Apps & Forks",
-    run: ({ openTab }) => {
-      openTab({ tabId: "workstations-tab" });
+    run: ({ openPanel }) => {
+      openPanel({ actionId: "workstations-tab", title: "Workstations" });
     },
   });
 });

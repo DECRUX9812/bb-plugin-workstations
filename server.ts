@@ -337,7 +337,37 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`environments.list failed: ${e}`);
     }
 
-    // B. Git Worktrees on Linux host
+    // B. Repositories discovered across all hosts via BB SDK daemons
+    const allHosts = await bb.sdk.hosts.list();
+    for (const h of allHosts) {
+      if (hostIdFilter && h.id !== hostIdFilter) continue;
+      try {
+        const disc = await bb.sdk.hosts.experimental_discoverRepos({ hostId: h.id });
+        for (const r of disc.repos || []) {
+          if (seenPaths.has(r.path)) continue;
+          seenPaths.add(r.path);
+
+          worktrees.push({
+            id: `repo-${r.name}-${h.id}`,
+            name: `${r.name} (git repo)`,
+            kind: "git_worktree",
+            hostId: h.id,
+            hostName: h.name,
+            path: r.path,
+            branch: "main",
+            repoName: r.name,
+            threadId: null,
+            threadTitle: null,
+            status: "repo",
+            isMain: true,
+          });
+        }
+      } catch (e) {
+        bb.log.warn(`experimental_discoverRepos failed for ${h.id}: ${e}`);
+      }
+    }
+
+    // C. Git Worktrees on local host (if readable directly)
     const localId = await getLocalHostId();
     const canScanLinux = !hostIdFilter || isDecruxLinux(hostIdFilter) || hostIdFilter === localId;
     if (canScanLinux) {

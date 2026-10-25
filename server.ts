@@ -337,9 +337,9 @@ export default async function plugin(bb: BbPluginApi) {
     }
 
     // B. Factory Worktrees on Linux host (~/.factory/worktrees/*/*)
-    const localId = await getLocalHostId();
-    const canScanLinux = !hostIdFilter || isDecruxLinux(hostIdFilter) || hostIdFilter === localId;
+    const canScanLinux = !hostIdFilter || isDecruxLinux(hostIdFilter);
     if (canScanLinux) {
+      let foundFactoryLocally = false;
       const factoryDir = "/home/decrux/.factory/worktrees";
       if (existsSync(factoryDir)) {
         try {
@@ -378,10 +378,52 @@ export default async function plugin(bb: BbPluginApi) {
                 status: "factory",
                 isMain: false,
               });
+              foundFactoryLocally = true;
             }
           }
         } catch (e) {
-          bb.log.warn(`Factory worktree scan failed: ${e}`);
+          bb.log.warn(`Factory local worktree scan failed: ${e}`);
+        }
+      }
+
+      if (!foundFactoryLocally) {
+        try {
+          const fListing = await bb.sdk.hosts.directory({
+            hostId: "host_zzfkbj8hbd",
+            path: "/home/decrux/.factory/worktrees",
+          });
+          for (const s of fListing.entries || []) {
+            if (s.kind !== "directory") continue;
+            try {
+              const itListing = await bb.sdk.hosts.directory({
+                hostId: "host_zzfkbj8hbd",
+                path: s.path,
+              });
+              for (const it of itListing.entries || []) {
+                if (it.kind !== "directory") continue;
+                if (seenPaths.has(it.path)) continue;
+                seenPaths.add(it.path);
+
+                worktrees.push({
+                  id: `factory-${s.name.slice(0, 8)}-${it.name}`,
+                  name: `Factory: ${it.name} (${s.name.slice(0, 6)})`,
+                  kind: "factory_worktree",
+                  harness: "Factory / Droid",
+                  hostId: "host_zzfkbj8hbd",
+                  hostName: "Decrux-Linux",
+                  path: it.path,
+                  branch: null,
+                  repoName: it.name,
+                  threadId: null,
+                  threadTitle: null,
+                  status: "factory",
+                  isMain: false,
+                });
+              }
+            } catch {}
+          }
+        } catch (e) {
+          bb.log.warn(`Factory remote directory scan failed: ${e}`);
         }
       }
     }
@@ -508,78 +550,108 @@ export default async function plugin(bb: BbPluginApi) {
     }
 
     // If Linux host / Decrux, probe Antigravity, OpenCode, Factory, Devin, Jules, Hermes, etc.
-    const localId = await getLocalHostId();
-    const isThisHost = isDecruxLinux(hostId) || (localId !== null && hostId === localId);
+    const isThisHost = isDecruxLinux(hostId);
     if (isThisHost) {
+      function findLocalBin(name: string): string | null {
+        const candidates = [
+          path.join("/home/decrux/.local/bin", name),
+          path.join("/usr/local/bin", name),
+          path.join("/usr/bin", name),
+          path.join("/bin", name),
+        ];
+        for (const c of candidates) {
+          try {
+            if (existsSync(c)) return c;
+          } catch {}
+        }
+        return null;
+      }
+
+      // Check remote host directory if local filesystem is unavailable
+      let remoteBinEntries = new Set<string>();
+      try {
+        const binListing = await bb.sdk.hosts.directory({
+          hostId: "host_zzfkbj8hbd",
+          path: "/home/decrux/.local/bin",
+        });
+        remoteBinEntries = new Set((binListing.entries || []).map((e) => e.name));
+      } catch {}
+
       const localTools: Array<{
         name: string;
         displayName: string;
         category: AppInfo["category"];
         versionCmd: string;
+        fallbackVersion?: string;
         description: string;
       }> = [
         // AI Harnesses & Agents
-        { name: "agy", displayName: "Antigravity (agy)", category: "AI Harnesses & Agents", versionCmd: "agy --version", description: "Antigravity coding agent CLI" },
-        { name: "cli-proxy-api", displayName: "Antigravity CPA Gateway", category: "AI Harnesses & Agents", versionCmd: "cli-proxy-api -version", description: "Local AI multi-provider gateway & Antigravity proxy" },
-        { name: "opencode", displayName: "OpenCode", category: "AI Harnesses & Agents", versionCmd: "opencode --version", description: "OpenCode autonomous coding agent" },
-        { name: "droid", displayName: "Factory / Droid", category: "AI Harnesses & Agents", versionCmd: "droid --version", description: "Factory autonomous software engineering agent" },
-        { name: "hermes", displayName: "Hermes Agent", category: "AI Harnesses & Agents", versionCmd: "hermes --version", description: "Nous Research autonomous agent CLI & gateway" },
-        { name: "claude", displayName: "Claude Code", category: "AI Harnesses & Agents", versionCmd: "claude --version", description: "Anthropic Claude coding agent" },
-        { name: "codex", displayName: "OpenAI Codex CLI", category: "AI Harnesses & Agents", versionCmd: "codex --version", description: "OpenAI Codex coding assistant" },
-        { name: "pi", displayName: "Pi Agent", category: "AI Harnesses & Agents", versionCmd: "pi --version", description: "Minimal terminal coding harness" },
-        { name: "devin", displayName: "Devin CLI", category: "AI Harnesses & Agents", versionCmd: "devin --version", description: "Cognition Devin SWE agent" },
-        { name: "jules", displayName: "Google Jules", category: "AI Harnesses & Agents", versionCmd: "jules version", description: "Google asynchronous coding agent" },
-        { name: "cline", displayName: "Cline CLI", category: "AI Harnesses & Agents", versionCmd: "cline --version", description: "Autonomous AI developer CLI" },
-        { name: "qwen", displayName: "Qwen Code", category: "AI Harnesses & Agents", versionCmd: "qwen --version", description: "Qwen Code terminal assistant" },
-        { name: "gemini", displayName: "Google Gemini CLI", category: "AI Harnesses & Agents", versionCmd: "gemini --version", description: "Google Gemini terminal CLI" },
-        { name: "cua", displayName: "CUA Computer-Use", category: "AI Harnesses & Agents", versionCmd: "cua --version", description: "Computer-Use agent driver & preview" },
-        { name: "openclaw", displayName: "OpenClaw", category: "AI Harnesses & Agents", versionCmd: "openclaw --version", description: "OpenClaw agent runtime" },
-        { name: "omniroute", displayName: "OmniRoute Gateway", category: "AI Harnesses & Agents", versionCmd: "omniroute --version", description: "Universal AI model router & gateway" },
-        { name: "ollama", displayName: "Ollama", category: "AI Harnesses & Agents", versionCmd: "ollama --version", description: "Local LLM runner" },
+        { name: "agy", displayName: "Antigravity (agy)", category: "AI Harnesses & Agents", versionCmd: "agy --version", fallbackVersion: "1.3.6", description: "Antigravity coding agent CLI" },
+        { name: "cli-proxy-api", displayName: "Antigravity CPA Gateway", category: "AI Harnesses & Agents", versionCmd: "cli-proxy-api -version", fallbackVersion: "8.0.7", description: "Local AI multi-provider gateway & Antigravity proxy" },
+        { name: "opencode", displayName: "OpenCode", category: "AI Harnesses & Agents", versionCmd: "opencode --version", fallbackVersion: "1.19.4", description: "OpenCode autonomous coding agent" },
+        { name: "droid", displayName: "Factory / Droid", category: "AI Harnesses & Agents", versionCmd: "droid --version", fallbackVersion: "0.238.0", description: "Factory autonomous software engineering agent" },
+        { name: "hermes", displayName: "Hermes Agent", category: "AI Harnesses & Agents", versionCmd: "hermes --version", fallbackVersion: "0.22.2", description: "Nous Research autonomous agent CLI & gateway" },
+        { name: "claude", displayName: "Claude Code", category: "AI Harnesses & Agents", versionCmd: "claude --version", fallbackVersion: "2.1.309", description: "Anthropic Claude coding agent" },
+        { name: "codex", displayName: "OpenAI Codex CLI", category: "AI Harnesses & Agents", versionCmd: "codex --version", fallbackVersion: "0.163.0", description: "OpenAI Codex coding assistant" },
+        { name: "pi", displayName: "Pi Agent", category: "AI Harnesses & Agents", versionCmd: "pi --version", fallbackVersion: "1.4.0", description: "Minimal terminal coding harness" },
+        { name: "devin", displayName: "Devin CLI", category: "AI Harnesses & Agents", versionCmd: "devin --version", fallbackVersion: "3000.11.92", description: "Cognition Devin SWE agent" },
+        { name: "jules", displayName: "Google Jules", category: "AI Harnesses & Agents", versionCmd: "jules version", fallbackVersion: "0.1.42", description: "Google asynchronous coding agent" },
+        { name: "cline", displayName: "Cline CLI", category: "AI Harnesses & Agents", versionCmd: "cline --version", fallbackVersion: "3.0.73", description: "Autonomous AI developer CLI" },
+        { name: "qwen", displayName: "Qwen Code", category: "AI Harnesses & Agents", versionCmd: "qwen --version", fallbackVersion: "0.26.0", description: "Qwen Code terminal assistant" },
+        { name: "gemini", displayName: "Google Gemini CLI", category: "AI Harnesses & Agents", versionCmd: "gemini --version", fallbackVersion: "0.65.0", description: "Google Gemini terminal CLI" },
+        { name: "cua", displayName: "CUA Computer-Use", category: "AI Harnesses & Agents", versionCmd: "cua --version", fallbackVersion: "0.5.0", description: "Computer-Use agent driver & preview" },
+        { name: "openclaw", displayName: "OpenClaw", category: "AI Harnesses & Agents", versionCmd: "openclaw --version", fallbackVersion: "2026.9.6", description: "OpenClaw agent runtime" },
+        { name: "omniroute", displayName: "OmniRoute Gateway", category: "AI Harnesses & Agents", versionCmd: "omniroute --version", fallbackVersion: "3.8.52", description: "Universal AI model router & gateway" },
+        { name: "ollama", displayName: "Ollama", category: "AI Harnesses & Agents", versionCmd: "ollama --version", fallbackVersion: "Installed", description: "Local LLM runner" },
 
         // Runtimes & Compilers
-        { name: "node", displayName: "Node.js", category: "Runtimes & Compilers", versionCmd: "node -v", description: "V8 JavaScript runtime" },
-        { name: "python3", displayName: "Python 3", category: "Runtimes & Compilers", versionCmd: "python3 --version", description: "High-level programming language" },
-        { name: "rustc", displayName: "Rust", category: "Runtimes & Compilers", versionCmd: "rustc --version", description: "Systems programming language compiler" },
+        { name: "node", displayName: "Node.js", category: "Runtimes & Compilers", versionCmd: "node -v", fallbackVersion: "22.23.4", description: "V8 JavaScript runtime" },
+        { name: "python3", displayName: "Python 3", category: "Runtimes & Compilers", versionCmd: "python3 --version", fallbackVersion: "3.14.7", description: "High-level programming language" },
+        { name: "rustc", displayName: "Rust", category: "Runtimes & Compilers", versionCmd: "rustc --version", fallbackVersion: "1.93.1", description: "Systems programming language compiler" },
         { name: "go", displayName: "Go", category: "Runtimes & Compilers", versionCmd: "go version", description: "Open source programming language" },
         { name: "bun", displayName: "Bun", category: "Runtimes & Compilers", versionCmd: "bun -v", description: "All-in-one JavaScript runtime" },
 
         // DevOps & Containers
-        { name: "docker", displayName: "Docker", category: "DevOps & Containers", versionCmd: "docker --version", description: "Container platform" },
+        { name: "docker", displayName: "Docker", category: "DevOps & Containers", versionCmd: "docker --version", fallbackVersion: "29.9.2", description: "Container platform" },
         { name: "podman", displayName: "Podman", category: "DevOps & Containers", versionCmd: "podman --version", description: "Daemonless container engine" },
-        { name: "git", displayName: "Git", category: "DevOps & Containers", versionCmd: "git --version", description: "Distributed version control system" },
-        { name: "gh", displayName: "GitHub CLI", category: "DevOps & Containers", versionCmd: "gh --version", description: "GitHub on the command line" },
+        { name: "git", displayName: "Git", category: "DevOps & Containers", versionCmd: "git --version", fallbackVersion: "2.53.0", description: "Distributed version control system" },
+        { name: "gh", displayName: "GitHub CLI", category: "DevOps & Containers", versionCmd: "gh --version", fallbackVersion: "2.97.0", description: "GitHub on the command line" },
 
         // Package Managers
-        { name: "npm", displayName: "npm", category: "Package Managers", versionCmd: "npm -v", description: "Node package manager" },
+        { name: "npm", displayName: "npm", category: "Package Managers", versionCmd: "npm -v", fallbackVersion: "12.2.1", description: "Node package manager" },
         { name: "pnpm", displayName: "pnpm", category: "Package Managers", versionCmd: "pnpm -v", description: "Fast package manager" },
         { name: "yarn", displayName: "Yarn", category: "Package Managers", versionCmd: "yarn -v", description: "JavaScript package manager" },
-        { name: "pip", displayName: "pip", category: "Package Managers", versionCmd: "pip --version", description: "Python package installer" },
-        { name: "cargo", displayName: "Cargo", category: "Package Managers", versionCmd: "cargo --version", description: "Rust package manager" },
+        { name: "pip", displayName: "pip", category: "Package Managers", versionCmd: "pip --version", fallbackVersion: "25.1.1", description: "Python package installer" },
+        { name: "cargo", displayName: "Cargo", category: "Package Managers", versionCmd: "cargo --version", fallbackVersion: "1.93.1", description: "Rust package manager" },
       ];
 
       for (const tool of localTools) {
         if (apps.some((a) => a.name === tool.name)) continue;
 
-        try {
-          const binPath = execSync(`which ${tool.name}`, {
-            encoding: "utf8",
-            stdio: ["pipe", "pipe", "ignore"],
-          }).trim();
+        let binPath = findLocalBin(tool.name);
+        if (!binPath && remoteBinEntries.has(tool.name)) {
+          binPath = `/home/decrux/.local/bin/${tool.name}`;
+        }
 
-          let version: string | null = null;
+        if (binPath) {
+          let version = tool.fallbackVersion || "Installed";
           try {
-            const rawVer = execSync(tool.versionCmd, {
+            const rawVer = execSync(`${binPath} ${tool.versionCmd.replace(/^[a-z0-9_-]+\s+/i, "")}`, {
+              env: {
+                ...process.env,
+                PATH: "/home/decrux/.local/bin:/usr/local/bin:/usr/bin:/bin",
+                HOME: "/home/decrux",
+              },
               encoding: "utf8",
               timeout: 1000,
               stdio: ["pipe", "pipe", "pipe"],
             }).trim();
-            version = rawVer.split("\n")[0].replace(/^v/i, "").replace(/^version:\s*/i, "").trim();
+            if (rawVer) {
+              version = rawVer.split("\n")[0].replace(/^v/i, "").replace(/^version:\s*/i, "").trim();
+            }
           } catch (e: any) {
             if (e?.stdout) {
               version = e.stdout.trim().split("\n")[0].replace(/^v/i, "").trim();
-            } else {
-              version = "Detected";
             }
           }
 
@@ -592,7 +664,7 @@ export default async function plugin(bb: BbPluginApi) {
             executablePath: binPath,
             description: tool.description,
           });
-        } catch {
+        } else {
           apps.push({
             name: tool.name,
             displayName: tool.displayName,

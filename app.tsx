@@ -1,11 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
 import {
   definePluginApp,
-  useBbNavigate,
   useRpc,
-  type PluginNavPanelProps,
-  type PluginThreadPanelProps,
 } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -19,12 +15,13 @@ import type {
   FileReadResult,
   HostInfo,
   RepoInfo,
+  WorktreeInfo,
   rpcContract,
 } from "./server";
 
-type ActiveTab = "files" | "apps" | "repos" | "workstations";
+type ActiveTab = "files" | "worktrees" | "apps" | "repos" | "workstations";
 
-function formatBytes(bytes?: number): string {
+function formatBytes(bytes?: number | null): string {
   if (bytes === undefined || bytes === null || isNaN(bytes)) return "";
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -48,7 +45,6 @@ function getFileIcon(entry: DirEntry): { icon: string; color: string } {
 
 export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | "panel" }) {
   const rpc = useRpc<typeof rpcContract>();
-  const navigate = useBbNavigate();
 
   // Core workstation state
   const [hosts, setHosts] = useState<HostInfo[]>([]);
@@ -65,6 +61,13 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
   const [selectedFile, setSelectedFile] = useState<DirEntry | null>(null);
   const [fileContent, setFileContent] = useState<FileReadResult | null>(null);
   const [loadingFile, setLoadingFile] = useState(false);
+  const [worktreeMenuOpen, setWorktreeMenuOpen] = useState(false);
+
+  // Worktrees state
+  const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
+  const [loadingWorktrees, setLoadingWorktrees] = useState(false);
+  const [worktreeFilter, setWorktreeFilter] = useState("");
+  const [worktreeKindFilter, setWorktreeKindFilter] = useState<"all" | "thread_environment" | "git_worktree">("all");
 
   // Apps state
   const [apps, setApps] = useState<AppInfo[]>([]);
@@ -84,11 +87,10 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
       const res = await rpc.call("workstations_list");
       setHosts(res.hosts);
       if (res.hosts.length > 0 && !selectedHostId) {
-        // Default to local host or first host
         const preferred = res.hosts.find((h) => h.isLocal) || res.hosts[0];
         setSelectedHostId(preferred.id);
       }
-    } catch (e) {
+    } catch {
       toast.error("Failed to load workstations");
     } finally {
       setLoadingHosts(false);
@@ -106,17 +108,17 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
 
   // 2. Fetch Directory when host or path changes
   const fetchDirectory = useCallback(
-    async (path?: string) => {
+    async (dirPath?: string) => {
       if (!selectedHostId) return;
       try {
         setLoadingDir(true);
         const res = await rpc.call("workstations_directory", {
           hostId: selectedHostId,
-          path,
+          path: dirPath && dirPath.trim().length > 0 ? dirPath.trim() : null,
         });
         setListing(res);
         setCurrentPath(res.directory);
-      } catch (e) {
+      } catch {
         toast.error("Failed to read directory");
       } finally {
         setLoadingDir(false);
@@ -143,7 +145,7 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
           path: entry.path,
         });
         setFileContent(res);
-      } catch (e) {
+      } catch {
         toast.error("Could not read file preview");
         setFileContent(null);
       } finally {
@@ -153,7 +155,26 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
     [rpc, selectedHostId]
   );
 
-  // 4. Fetch Apps when Apps tab active
+  // 4. Fetch Worktrees
+  const fetchWorktrees = useCallback(async () => {
+    try {
+      setLoadingWorktrees(true);
+      const res = await rpc.call("workstations_worktrees", {
+        hostId: selectedHostId || null,
+      });
+      setWorktrees(res.worktrees);
+    } catch {
+      toast.error("Failed to load worktrees");
+    } finally {
+      setLoadingWorktrees(false);
+    }
+  }, [rpc, selectedHostId]);
+
+  useEffect(() => {
+    fetchWorktrees();
+  }, [fetchWorktrees]);
+
+  // 5. Fetch Apps
   const fetchApps = useCallback(async () => {
     if (!selectedHostId) return;
     try {
@@ -173,7 +194,7 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
     }
   }, [selectedHostId, activeTab, fetchApps]);
 
-  // 5. Fetch Repos when Repos tab active
+  // 6. Fetch Repos
   const fetchRepos = useCallback(async () => {
     if (!selectedHostId) return;
     try {
@@ -215,17 +236,16 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
 
     const segments: Array<{ name: string; path: string }> = [];
     if (!isWin) {
-      // Linux root
       segments.push({ name: "/", path: "/" });
     }
 
-    let acc = isWin ? "" : "";
+    let acc = "";
     for (let i = 0; i < parts.length; i++) {
       if (isWin && i === 0) {
         acc = parts[0] + "\\";
         segments.push({ name: parts[0], path: acc });
       } else {
-        acc = acc + (acc.endsWith(sep) ? "" : sep) + parts[i];
+        acc = acc + (acc.endsWith(sep) || acc === "" ? "" : sep) + parts[i];
         segments.push({ name: parts[i], path: acc });
       }
     }
@@ -237,6 +257,19 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
     toast.success(`Copied ${label} to clipboard`);
   };
 
+  // Jump into a worktree's file system directly
+  const jumpToWorktree = (wt: WorktreeInfo) => {
+    if (wt.hostId !== selectedHostId) {
+      setSelectedHostId(wt.hostId);
+    }
+    setActiveTab("files");
+    setCurrentPath(wt.path);
+    fetchDirectory(wt.path);
+    setWorktreeMenuOpen(false);
+    toast.success(`Opened worktree: ${wt.name}`);
+  };
+
+  // Jump into a repo directory
   const jumpToRepo = (repoPath: string) => {
     setActiveTab("files");
     setCurrentPath(repoPath);
@@ -255,11 +288,11 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
             <div className="flex items-center gap-2">
               <span className="font-semibold text-sm tracking-tight">Workstations</span>
               <span className="rounded-full bg-primary/15 px-2 py-0.5 font-medium text-[11px] text-primary">
-                v1.0
+                v1.1
               </span>
             </div>
             <p className="text-xs text-muted-foreground">
-              Cross-machine file system, developer runtimes & git forks
+              Cross-machine file system, worktree manager & runtime inspector
             </p>
           </div>
         </div>
@@ -307,7 +340,10 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
             variant="ghost"
             size="icon"
             className="size-7"
-            onClick={fetchHosts}
+            onClick={() => {
+              fetchHosts();
+              fetchWorktrees();
+            }}
             title="Refresh workstations"
           >
             <Icon name="RefreshCw" className={cn("size-3.5", loadingHosts && "animate-spin")} />
@@ -315,7 +351,7 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
         </div>
       </header>
 
-      {/* Primary Sub-Navigation Tabs */}
+      {/* Primary Navigation Tabs */}
       <nav className="flex items-center border-b border-border bg-card/40 px-4">
         <button
           onClick={() => setActiveTab("files")}
@@ -328,6 +364,42 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
         >
           <Icon name="Folder" className="size-3.5" />
           <span>Files & Directory Tree</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab("worktrees")}
+          className={cn(
+            "flex items-center gap-2 border-b-2 px-3 py-2 text-xs font-medium transition-colors",
+            activeTab === "worktrees"
+              ? "border-primary text-primary"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          )}
+        >
+          <Icon name="GitBranch" className="size-3.5" />
+          <span>Worktrees & Environments</span>
+          {worktrees.length > 0 && (
+            <span className="rounded-full bg-primary/20 px-1.5 py-0.2 text-[10px] text-primary font-bold">
+              {worktrees.length}
+            </span>
+          )}
+        </button>
+
+        <button
+          onClick={() => setActiveTab("repos")}
+          className={cn(
+            "flex items-center gap-2 border-b-2 px-3 py-2 text-xs font-medium transition-colors",
+            activeTab === "repos"
+              ? "border-primary text-primary"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          )}
+        >
+          <Icon name="GitFork" className="size-3.5" />
+          <span>Git Repos & Forks</span>
+          {repos.length > 0 && (
+            <span className="rounded-full bg-accent px-1.5 py-0.2 text-[10px] text-foreground">
+              {repos.length}
+            </span>
+          )}
         </button>
 
         <button
@@ -344,24 +416,6 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
           {apps.length > 0 && (
             <span className="rounded-full bg-accent px-1.5 py-0.2 text-[10px] text-foreground">
               {apps.filter((a) => a.installed).length}
-            </span>
-          )}
-        </button>
-
-        <button
-          onClick={() => setActiveTab("repos")}
-          className={cn(
-            "flex items-center gap-2 border-b-2 px-3 py-2 text-xs font-medium transition-colors",
-            activeTab === "repos"
-              ? "border-primary text-primary"
-              : "border-transparent text-muted-foreground hover:text-foreground"
-          )}
-        >
-          <Icon name="GitBranch" className="size-3.5" />
-          <span>Git Repositories & Forks</span>
-          {repos.length > 0 && (
-            <span className="rounded-full bg-primary/20 px-1.5 py-0.2 text-[10px] text-primary">
-              {repos.length}
             </span>
           )}
         </button>
@@ -385,10 +439,68 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
         {/* TAB 1: FILES & DIRECTORY EXPLORER */}
         {activeTab === "files" && (
           <div className="flex h-full w-full flex-col">
-            {/* Explorer Bar: Roots, Breadcrumbs, Controls */}
+            {/* Explorer Bar: Quick-Worktrees, Roots, Breadcrumbs, Controls */}
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-card/20 px-4 py-2 text-xs">
-              {/* Breadcrumbs */}
-              <div className="flex flex-1 items-center gap-1 overflow-x-auto py-1">
+              {/* Left group: Worktree Jump, Roots, Breadcrumbs */}
+              <div className="flex flex-1 items-center gap-1.5 overflow-x-auto py-1">
+                {/* Worktree Jump Dropdown Button */}
+                <div className="relative">
+                  <Button
+                    variant="default"
+                    size="sm"
+                    className="h-7 gap-1.5 px-2.5 text-xs font-medium shadow-sm"
+                    onClick={() => setWorktreeMenuOpen(!worktreeMenuOpen)}
+                  >
+                    <Icon name="GitBranch" className="size-3.5" />
+                    <span>Worktrees ({worktrees.length})</span>
+                    <Icon name="ChevronDown" className="size-3 ml-0.5 opacity-80" />
+                  </Button>
+
+                  {/* Dropdown Menu */}
+                  {worktreeMenuOpen && (
+                    <div className="absolute left-0 top-8 z-50 w-80 max-h-96 overflow-y-auto rounded-lg border border-border bg-popover p-1.5 shadow-xl">
+                      <div className="px-2 py-1 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+                        Jump to Worktree
+                      </div>
+                      <div className="divide-y divide-border/50">
+                        {worktrees.slice(0, 30).map((wt) => (
+                          <button
+                            key={wt.id}
+                            onClick={() => jumpToWorktree(wt)}
+                            className="flex w-full flex-col items-start rounded p-2 text-left text-xs transition-colors hover:bg-accent hover:text-accent-foreground"
+                          >
+                            <div className="flex w-full items-center justify-between gap-1">
+                              <span className="font-semibold truncate max-w-[190px]">
+                                {wt.name}
+                              </span>
+                              <span className="rounded bg-secondary px-1.5 py-0.2 text-[10px] font-medium text-secondary-foreground shrink-0">
+                                {wt.hostName}
+                              </span>
+                            </div>
+                            <span className="font-mono text-[10px] text-muted-foreground truncate w-full mt-0.5">
+                              {wt.path}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                      <div className="border-t border-border mt-1 pt-1 text-center">
+                        <button
+                          onClick={() => {
+                            setWorktreeMenuOpen(false);
+                            setActiveTab("worktrees");
+                          }}
+                          className="w-full py-1 text-center text-xs font-medium text-primary hover:underline"
+                        >
+                          View All {worktrees.length} Worktrees →
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <span className="text-muted-foreground/40">|</span>
+
+                {/* Drive Roots */}
                 {listing?.roots?.map((root) => (
                   <button
                     key={root}
@@ -400,8 +512,6 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
                     {root}
                   </button>
                 ))}
-
-                <span className="text-muted-foreground/50">|</span>
 
                 {listing?.parent && (
                   <Button
@@ -518,7 +628,7 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
                             <span className="truncate">{entry.name}</span>
                           </div>
                           <div className="flex items-center gap-1 shrink-0 text-muted-foreground">
-                            {entry.kind === "file" && entry.sizeBytes !== undefined && (
+                            {entry.kind === "file" && entry.sizeBytes !== undefined && entry.sizeBytes !== null && (
                               <span className="text-[10px] font-mono">
                                 {formatBytes(entry.sizeBytes)}
                               </span>
@@ -616,130 +726,140 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
           </div>
         )}
 
-        {/* TAB 2: INSTALLED APPS & RUNTIMES */}
-        {activeTab === "apps" && (
+        {/* TAB 2: WORKTREES & ENVIRONMENTS */}
+        {activeTab === "worktrees" && (
           <div className="flex h-full flex-col overflow-y-auto p-4 md:p-6">
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
               <div>
-                <h3 className="text-base font-semibold">Installed Developer Runtimes & CLIs</h3>
+                <h3 className="text-base font-semibold">Active Worktrees & Environments</h3>
                 <p className="text-xs text-muted-foreground">
-                  Probed directly on workstation{" "}
-                  <strong className="text-foreground">{activeHost?.name || "selected"}</strong>
+                  Browse and switch across agent workspaces and linked git worktrees on all machines.
                 </p>
               </div>
 
-              {/* Search & Categories */}
               <div className="flex items-center gap-2">
                 <Input
-                  placeholder="Filter apps & tools..."
-                  value={appsFilter}
-                  onChange={(e) => setAppsFilter(e.target.value)}
+                  placeholder="Filter worktrees..."
+                  value={worktreeFilter}
+                  onChange={(e) => setWorktreeFilter(e.target.value)}
                   className="h-8 w-48 text-xs"
                 />
-                <Button variant="outline" size="sm" className="h-8 text-xs" onClick={fetchApps}>
-                  <Icon name="RefreshCw" className={cn("size-3 mr-1", loadingApps && "animate-spin")} />
+                <Button variant="outline" size="sm" className="h-8 text-xs" onClick={fetchWorktrees}>
+                  <Icon name="RefreshCw" className={cn("size-3 mr-1", loadingWorktrees && "animate-spin")} />
                   Rescan
                 </Button>
               </div>
             </div>
 
-            {/* Category Filter Pills */}
+            {/* Kind Filter Pills */}
             <div className="flex flex-wrap gap-1.5 mb-4">
               {[
-                "All",
-                "AI & Agents",
-                "Runtimes & Compilers",
-                "DevOps & Containers",
-                "Package Managers",
-              ].map((cat) => (
+                { id: "all", label: "All Worktrees" },
+                { id: "thread_environment", label: "Agent Workspaces" },
+                { id: "git_worktree", label: "Git Worktrees" },
+              ].map((tab) => (
                 <button
-                  key={cat}
-                  onClick={() => setSelectedCategory(cat)}
+                  key={tab.id}
+                  onClick={() => setWorktreeKindFilter(tab.id as any)}
                   className={cn(
                     "rounded-full px-3 py-1 text-xs font-medium transition-colors",
-                    selectedCategory === cat
+                    worktreeKindFilter === tab.id
                       ? "bg-primary text-primary-foreground"
                       : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
                   )}
                 >
-                  {cat}
+                  {tab.label}
                 </button>
               ))}
             </div>
 
-            {/* Apps Grid */}
-            {loadingApps ? (
+            {loadingWorktrees ? (
               <div className="flex h-48 items-center justify-center text-xs text-muted-foreground">
                 <Icon name="RefreshCw" className="size-4 animate-spin mr-2" />
-                Scanning installed runtimes…
+                Scanning worktrees across machines…
+              </div>
+            ) : worktrees.length === 0 ? (
+              <div className="p-8 text-center text-xs text-muted-foreground border border-dashed rounded-lg">
+                No worktrees found.
               </div>
             ) : (
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {apps
-                  .filter((a) => {
-                    if (selectedCategory !== "All" && a.category !== selectedCategory) return false;
-                    if (appsFilter && !a.displayName.toLowerCase().includes(appsFilter.toLowerCase())) {
+              <div className="space-y-3">
+                {worktrees
+                  .filter((w) => {
+                    if (worktreeKindFilter !== "all" && w.kind !== worktreeKindFilter) return false;
+                    if (
+                      worktreeFilter &&
+                      !w.name.toLowerCase().includes(worktreeFilter.toLowerCase()) &&
+                      !w.path.toLowerCase().includes(worktreeFilter.toLowerCase()) &&
+                      !(w.branch && w.branch.toLowerCase().includes(worktreeFilter.toLowerCase()))
+                    ) {
                       return false;
                     }
                     return true;
                   })
-                  .map((app) => (
+                  .map((wt) => (
                     <div
-                      key={app.name}
-                      className={cn(
-                        "flex flex-col justify-between rounded-lg border p-3.5 transition-shadow",
-                        app.installed
-                          ? "border-border bg-card/80 shadow-sm"
-                          : "border-border/40 bg-card/30 opacity-70"
-                      )}
+                      key={wt.id}
+                      className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-border bg-card/70 p-4 transition-all hover:border-primary/50"
                     >
-                      <div>
-                        <div className="flex items-start justify-between gap-2">
-                          <div>
-                            <span className="font-semibold text-sm">{app.displayName}</span>
-                            <span className="block text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">
-                              {app.category}
-                            </span>
-                          </div>
-                          {app.installed ? (
-                            <span className="flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-500">
-                              <span className="size-1.5 rounded-full bg-emerald-500" />
-                              Installed
-                            </span>
-                          ) : (
-                            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-                              Not found
+                      <div className="flex flex-col gap-1.5 min-w-[280px]">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-sm text-foreground">
+                            {wt.name}
+                          </span>
+
+                          <span
+                            className={cn(
+                              "rounded px-2 py-0.5 text-[11px] font-semibold",
+                              wt.kind === "thread_environment"
+                                ? "bg-primary/15 text-primary"
+                                : "bg-purple-500/15 text-purple-400"
+                            )}
+                          >
+                            {wt.kind === "thread_environment" ? "Agent Workspace" : "Git Worktree"}
+                          </span>
+
+                          <span className="rounded bg-secondary px-2 py-0.5 text-[11px] font-medium text-secondary-foreground">
+                            {wt.hostName}
+                          </span>
+
+                          {wt.branch && (
+                            <span className="flex items-center gap-1 rounded bg-accent px-2 py-0.5 text-[11px] font-mono text-muted-foreground">
+                              <Icon name="GitBranch" className="size-3" />
+                              {wt.branch}
                             </span>
                           )}
+
+                          <span className="rounded bg-muted px-2 py-0.5 text-[10px] text-muted-foreground capitalize">
+                            {wt.status}
+                          </span>
                         </div>
 
-                        {app.version && (
-                          <div className="mt-2.5 inline-block rounded bg-accent/60 px-2 py-0.5 font-mono text-[11px] text-foreground font-medium">
-                            {app.version}
-                          </div>
-                        )}
-
-                        {app.description && (
-                          <p className="mt-2 text-xs text-muted-foreground line-clamp-2">
-                            {app.description}
-                          </p>
-                        )}
+                        <div className="font-mono text-xs text-muted-foreground truncate max-w-xl">
+                          {wt.path}
+                        </div>
                       </div>
 
-                      {app.executablePath && (
-                        <div className="mt-3 flex items-center justify-between border-t border-border/50 pt-2 text-[10px] text-muted-foreground font-mono">
-                          <span className="truncate max-w-[200px]" title={app.executablePath}>
-                            {app.executablePath}
-                          </span>
-                          <button
-                            onClick={() => copyToClipboard(app.executablePath!, "path")}
-                            className="hover:text-foreground"
-                            title="Copy executable path"
-                          >
-                            <Icon name="Copy" className="size-3" />
-                          </button>
-                        </div>
-                      )}
+                      {/* Actions */}
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="default"
+                          size="sm"
+                          className="h-8 gap-1.5 text-xs font-medium"
+                          onClick={() => jumpToWorktree(wt)}
+                        >
+                          <Icon name="Folder" className="size-3.5" />
+                          Explore Worktree Files
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 text-xs"
+                          onClick={() => copyToClipboard(wt.path, "worktree path")}
+                        >
+                          <Icon name="Copy" className="size-3" />
+                        </Button>
+                      </div>
                     </div>
                   ))}
               </div>
@@ -882,7 +1002,138 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
           </div>
         )}
 
-        {/* TAB 4: WORKSTATIONS MATRIX */}
+        {/* TAB 4: INSTALLED APPS & RUNTIMES */}
+        {activeTab === "apps" && (
+          <div className="flex h-full flex-col overflow-y-auto p-4 md:p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <div>
+                <h3 className="text-base font-semibold">Installed Developer Runtimes & CLIs</h3>
+                <p className="text-xs text-muted-foreground">
+                  Probed directly on workstation{" "}
+                  <strong className="text-foreground">{activeHost?.name || "selected"}</strong>
+                </p>
+              </div>
+
+              {/* Search & Categories */}
+              <div className="flex items-center gap-2">
+                <Input
+                  placeholder="Filter apps & tools..."
+                  value={appsFilter}
+                  onChange={(e) => setAppsFilter(e.target.value)}
+                  className="h-8 w-48 text-xs"
+                />
+                <Button variant="outline" size="sm" className="h-8 text-xs" onClick={fetchApps}>
+                  <Icon name="RefreshCw" className={cn("size-3 mr-1", loadingApps && "animate-spin")} />
+                  Rescan
+                </Button>
+              </div>
+            </div>
+
+            {/* Category Filter Pills */}
+            <div className="flex flex-wrap gap-1.5 mb-4">
+              {[
+                "All",
+                "AI & Agents",
+                "Runtimes & Compilers",
+                "DevOps & Containers",
+                "Package Managers",
+              ].map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setSelectedCategory(cat)}
+                  className={cn(
+                    "rounded-full px-3 py-1 text-xs font-medium transition-colors",
+                    selectedCategory === cat
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                  )}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+
+            {/* Apps Grid */}
+            {loadingApps ? (
+              <div className="flex h-48 items-center justify-center text-xs text-muted-foreground">
+                <Icon name="RefreshCw" className="size-4 animate-spin mr-2" />
+                Scanning installed runtimes…
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {apps
+                  .filter((a) => {
+                    if (selectedCategory !== "All" && a.category !== selectedCategory) return false;
+                    if (appsFilter && !a.displayName.toLowerCase().includes(appsFilter.toLowerCase())) {
+                      return false;
+                    }
+                    return true;
+                  })
+                  .map((app) => (
+                    <div
+                      key={app.name}
+                      className={cn(
+                        "flex flex-col justify-between rounded-lg border p-3.5 transition-shadow",
+                        app.installed
+                          ? "border-border bg-card/80 shadow-sm"
+                          : "border-border/40 bg-card/30 opacity-70"
+                      )}
+                    >
+                      <div>
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <span className="font-semibold text-sm">{app.displayName}</span>
+                            <span className="block text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">
+                              {app.category}
+                            </span>
+                          </div>
+                          {app.installed ? (
+                            <span className="flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-500">
+                              <span className="size-1.5 rounded-full bg-emerald-500" />
+                              Installed
+                            </span>
+                          ) : (
+                            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                              Not found
+                            </span>
+                          )}
+                        </div>
+
+                        {app.version && (
+                          <div className="mt-2.5 inline-block rounded bg-accent/60 px-2 py-0.5 font-mono text-[11px] text-foreground font-medium">
+                            {app.version}
+                          </div>
+                        )}
+
+                        {app.description && (
+                          <p className="mt-2 text-xs text-muted-foreground line-clamp-2">
+                            {app.description}
+                          </p>
+                        )}
+                      </div>
+
+                      {app.executablePath && (
+                        <div className="mt-3 flex items-center justify-between border-t border-border/50 pt-2 text-[10px] text-muted-foreground font-mono">
+                          <span className="truncate max-w-[200px]" title={app.executablePath}>
+                            {app.executablePath}
+                          </span>
+                          <button
+                            onClick={() => copyToClipboard(app.executablePath!, "path")}
+                            className="hover:text-foreground"
+                            title="Copy executable path"
+                          >
+                            <Icon name="Copy" className="size-3" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 5: WORKSTATIONS MATRIX */}
         {activeTab === "workstations" && (
           <div className="flex h-full flex-col overflow-y-auto p-4 md:p-6">
             <div className="mb-4">

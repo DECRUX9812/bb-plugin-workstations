@@ -55,7 +55,8 @@ export type FileReadResult = z.infer<typeof fileReadSchema>;
 const worktreeInfoSchema = z.object({
   id: z.string(),
   name: z.string(),
-  kind: z.enum(["thread_environment", "git_worktree"]),
+  kind: z.enum(["thread_environment", "git_worktree", "factory_worktree"]),
+  harness: z.string().nullable(),
   hostId: z.string(),
   hostName: z.string(),
   path: z.string(),
@@ -73,6 +74,7 @@ const appInfoSchema = z.object({
   name: z.string(),
   displayName: z.string(),
   category: z.enum([
+    "AI Harnesses & Agents",
     "AI & Agents",
     "Runtimes & Compilers",
     "DevOps & Containers",
@@ -237,7 +239,6 @@ export default async function plugin(bb: BbPluginApi) {
       };
     });
 
-    // Sort: directories first alphabetically, then files alphabetically
     entries.sort((a, b) => {
       if (a.kind !== b.kind) return a.kind === "directory" ? -1 : 1;
       return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
@@ -271,7 +272,6 @@ export default async function plugin(bb: BbPluginApi) {
         editable: isText && sizeBytes <= 4 * 1024 * 1024,
       };
     } catch {
-      // Local fallback if on this host
       const localId = await getLocalHostId();
       if ((!hostId || hostId === localId || isDecruxLinux(hostId)) && existsSync(filePath)) {
         try {
@@ -286,20 +286,18 @@ export default async function plugin(bb: BbPluginApi) {
             isBinary: false,
             editable: true,
           };
-        } catch {
-          // Binary or unreadable
-        }
+        } catch {}
       }
       throw new Error(`Could not read file ${filePath} on host ${hostId}`);
     }
   }
 
-  // 4. Discover Worktrees & Environments across BB & Git
+  // 4. Discover Worktrees & Environments across BB, Factory, and Git
   async function listWorktrees(hostIdFilter?: string | null): Promise<{ worktrees: WorktreeInfo[] }> {
     const worktrees: WorktreeInfo[] = [];
     const seenPaths = new Set<string>();
 
-    // A. Thread Environments across all hosts
+    // A. BB Thread Environments across all hosts
     try {
       const envs = await bb.sdk.environments.list();
       const threads = await bb.sdk.threads.list();
@@ -322,6 +320,7 @@ export default async function plugin(bb: BbPluginApi) {
           id: env.id,
           name: title,
           kind: "thread_environment",
+          harness: "BB Agent",
           hostId: env.hostId,
           hostName: hostMap.get(env.hostId) || env.hostId,
           path: env.path,
@@ -337,7 +336,57 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`environments.list failed: ${e}`);
     }
 
-    // B. Repositories discovered across all hosts via BB SDK daemons
+    // B. Factory Worktrees on Linux host (~/.factory/worktrees/*/*)
+    const localId = await getLocalHostId();
+    const canScanLinux = !hostIdFilter || isDecruxLinux(hostIdFilter) || hostIdFilter === localId;
+    if (canScanLinux) {
+      const factoryDir = "/home/decrux/.factory/worktrees";
+      if (existsSync(factoryDir)) {
+        try {
+          const sessions = readdirSync(factoryDir, { withFileTypes: true });
+          for (const s of sessions) {
+            if (!s.isDirectory()) continue;
+            const sessionPath = path.join(factoryDir, s.name);
+            const items = readdirSync(sessionPath, { withFileTypes: true });
+            for (const it of items) {
+              if (!it.isDirectory()) continue;
+              const itemPath = path.join(sessionPath, it.name);
+              if (seenPaths.has(itemPath)) continue;
+              seenPaths.add(itemPath);
+
+              let branch: string | null = null;
+              try {
+                branch = execSync("git rev-parse --abbrev-ref HEAD", {
+                  cwd: itemPath,
+                  encoding: "utf8",
+                  stdio: ["pipe", "pipe", "ignore"],
+                }).trim() || null;
+              } catch {}
+
+              worktrees.push({
+                id: `factory-${s.name.slice(0, 8)}-${it.name}`,
+                name: `Factory: ${it.name} (${s.name.slice(0, 6)})`,
+                kind: "factory_worktree",
+                harness: "Factory / Droid",
+                hostId: "host_zzfkbj8hbd",
+                hostName: "Decrux-Linux",
+                path: itemPath,
+                branch: branch ?? null,
+                repoName: it.name,
+                threadId: null,
+                threadTitle: null,
+                status: "factory",
+                isMain: false,
+              });
+            }
+          }
+        } catch (e) {
+          bb.log.warn(`Factory worktree scan failed: ${e}`);
+        }
+      }
+    }
+
+    // C. Repositories discovered across all hosts via BB SDK daemons
     const allHosts = await bb.sdk.hosts.list();
     for (const h of allHosts) {
       if (hostIdFilter && h.id !== hostIdFilter) continue;
@@ -349,8 +398,9 @@ export default async function plugin(bb: BbPluginApi) {
 
           worktrees.push({
             id: `repo-${r.name}-${h.id}`,
-            name: `${r.name} (git repo)`,
+            name: `${r.name}`,
             kind: "git_worktree",
+            harness: "Git Worktree",
             hostId: h.id,
             hostName: h.name,
             path: r.path,
@@ -367,9 +417,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
     }
 
-    // C. Git Worktrees on local host (if readable directly)
-    const localId = await getLocalHostId();
-    const canScanLinux = !hostIdFilter || isDecruxLinux(hostIdFilter) || hostIdFilter === localId;
+    // D. Git Worktrees on local Linux host (/home/decrux/Code)
     if (canScanLinux) {
       const baseDir = "/home/decrux/Code";
       if (existsSync(baseDir)) {
@@ -400,8 +448,9 @@ export default async function plugin(bb: BbPluginApi) {
                     const wtName = path.basename(cur.path);
                     worktrees.push({
                       id: `git-wt-${wtName}-${Math.random().toString(36).slice(2, 6)}`,
-                      name: isMain ? `${ent.name} (main worktree)` : `${ent.name} → ${wtName}`,
+                      name: isMain ? `${ent.name}` : `${ent.name} → ${wtName}`,
                       kind: "git_worktree",
+                      harness: "Git Worktree",
                       hostId: "host_zzfkbj8hbd",
                       hostName: "Decrux-Linux",
                       path: cur.path,
@@ -416,42 +465,27 @@ export default async function plugin(bb: BbPluginApi) {
                   cur = {};
                 }
               }
-              if (cur.path && !seenPaths.has(cur.path)) {
-                seenPaths.add(cur.path);
-                const isMain = cur.path === repoPath;
-                const wtName = path.basename(cur.path);
-                worktrees.push({
-                  id: `git-wt-${wtName}-${Math.random().toString(36).slice(2, 6)}`,
-                  name: isMain ? `${ent.name} (main worktree)` : `${ent.name} → ${wtName}`,
-                  kind: "git_worktree",
-                  hostId: "host_zzfkbj8hbd",
-                  hostName: "Decrux-Linux",
-                  path: cur.path,
-                  branch: cur.branch ?? (cur.head ? cur.head.slice(0, 8) : null),
-                  repoName: ent.name,
-                  threadId: null,
-                  threadTitle: null,
-                  status: isMain ? "main" : "linked",
-                  isMain,
-                });
-              }
             } catch {}
           }
         } catch {}
       }
     }
 
-    // Sort: Thread environments first, then linked worktrees, then main worktrees
+    // Sort: BB Agent workspaces, then Factory worktrees, then Git worktrees
     worktrees.sort((a, b) => {
-      if (a.kind !== b.kind) return a.kind === "thread_environment" ? -1 : 1;
-      if (a.isMain !== b.isMain) return a.isMain ? 1 : -1;
+      if (a.kind !== b.kind) {
+        if (a.kind === "thread_environment") return -1;
+        if (b.kind === "thread_environment") return 1;
+        if (a.kind === "factory_worktree") return -1;
+        if (b.kind === "factory_worktree") return 1;
+      }
       return a.name.localeCompare(b.name);
     });
 
     return { worktrees };
   }
 
-  // 5. Live discovery of installed apps / tools
+  // 5. Live discovery of installed apps / tools & AI harnesses
   async function listApps(hostId: string): Promise<{ hostId: string; apps: AppInfo[] }> {
     const apps: AppInfo[] = [];
 
@@ -462,7 +496,7 @@ export default async function plugin(bb: BbPluginApi) {
         apps.push({
           name: item.executableName,
           displayName: item.displayName,
-          category: "AI & Agents",
+          category: "AI Harnesses & Agents",
           installed: item.installed,
           version: item.currentVersion ?? null,
           executablePath: item.executablePath ?? null,
@@ -473,7 +507,7 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`providerCliStatus failed for ${hostId}: ${e}`);
     }
 
-    // If local Linux host or host_zzfkbj8hbd, probe deep system packages & developer runtimes
+    // If Linux host / Decrux, probe Antigravity, OpenCode, Factory, Devin, Jules, Hermes, etc.
     const localId = await getLocalHostId();
     const isThisHost = isDecruxLinux(hostId) || (localId !== null && hostId === localId);
     if (isThisHost) {
@@ -484,25 +518,44 @@ export default async function plugin(bb: BbPluginApi) {
         versionCmd: string;
         description: string;
       }> = [
+        // AI Harnesses & Agents
+        { name: "agy", displayName: "Antigravity (agy)", category: "AI Harnesses & Agents", versionCmd: "agy --version", description: "Antigravity coding agent CLI" },
+        { name: "cli-proxy-api", displayName: "Antigravity CPA Gateway", category: "AI Harnesses & Agents", versionCmd: "cli-proxy-api -version", description: "Local AI multi-provider gateway & Antigravity proxy" },
+        { name: "opencode", displayName: "OpenCode", category: "AI Harnesses & Agents", versionCmd: "opencode --version", description: "OpenCode autonomous coding agent" },
+        { name: "droid", displayName: "Factory / Droid", category: "AI Harnesses & Agents", versionCmd: "droid --version", description: "Factory autonomous software engineering agent" },
+        { name: "hermes", displayName: "Hermes Agent", category: "AI Harnesses & Agents", versionCmd: "hermes --version", description: "Nous Research autonomous agent CLI & gateway" },
+        { name: "claude", displayName: "Claude Code", category: "AI Harnesses & Agents", versionCmd: "claude --version", description: "Anthropic Claude coding agent" },
+        { name: "codex", displayName: "OpenAI Codex CLI", category: "AI Harnesses & Agents", versionCmd: "codex --version", description: "OpenAI Codex coding assistant" },
+        { name: "pi", displayName: "Pi Agent", category: "AI Harnesses & Agents", versionCmd: "pi --version", description: "Minimal terminal coding harness" },
+        { name: "devin", displayName: "Devin CLI", category: "AI Harnesses & Agents", versionCmd: "devin --version", description: "Cognition Devin SWE agent" },
+        { name: "jules", displayName: "Google Jules", category: "AI Harnesses & Agents", versionCmd: "jules version", description: "Google asynchronous coding agent" },
+        { name: "cline", displayName: "Cline CLI", category: "AI Harnesses & Agents", versionCmd: "cline --version", description: "Autonomous AI developer CLI" },
+        { name: "qwen", displayName: "Qwen Code", category: "AI Harnesses & Agents", versionCmd: "qwen --version", description: "Qwen Code terminal assistant" },
+        { name: "gemini", displayName: "Google Gemini CLI", category: "AI Harnesses & Agents", versionCmd: "gemini --version", description: "Google Gemini terminal CLI" },
+        { name: "cua", displayName: "CUA Computer-Use", category: "AI Harnesses & Agents", versionCmd: "cua --version", description: "Computer-Use agent driver & preview" },
+        { name: "openclaw", displayName: "OpenClaw", category: "AI Harnesses & Agents", versionCmd: "openclaw --version", description: "OpenClaw agent runtime" },
+        { name: "omniroute", displayName: "OmniRoute Gateway", category: "AI Harnesses & Agents", versionCmd: "omniroute --version", description: "Universal AI model router & gateway" },
+        { name: "ollama", displayName: "Ollama", category: "AI Harnesses & Agents", versionCmd: "ollama --version", description: "Local LLM runner" },
+
+        // Runtimes & Compilers
         { name: "node", displayName: "Node.js", category: "Runtimes & Compilers", versionCmd: "node -v", description: "V8 JavaScript runtime" },
-        { name: "npm", displayName: "npm", category: "Package Managers", versionCmd: "npm -v", description: "Node package manager" },
-        { name: "pnpm", displayName: "pnpm", category: "Package Managers", versionCmd: "pnpm -v", description: "Fast, disk space efficient package manager" },
-        { name: "yarn", displayName: "Yarn", category: "Package Managers", versionCmd: "yarn -v", description: "JavaScript package manager" },
-        { name: "bun", displayName: "Bun", category: "Runtimes & Compilers", versionCmd: "bun -v", description: "All-in-one JavaScript runtime & toolkit" },
         { name: "python3", displayName: "Python 3", category: "Runtimes & Compilers", versionCmd: "python3 --version", description: "High-level programming language" },
-        { name: "pip", displayName: "pip", category: "Package Managers", versionCmd: "pip --version", description: "Python package installer" },
         { name: "rustc", displayName: "Rust", category: "Runtimes & Compilers", versionCmd: "rustc --version", description: "Systems programming language compiler" },
-        { name: "cargo", displayName: "Cargo", category: "Package Managers", versionCmd: "cargo --version", description: "Rust package manager & build tool" },
         { name: "go", displayName: "Go", category: "Runtimes & Compilers", versionCmd: "go version", description: "Open source programming language" },
-        { name: "git", displayName: "Git", category: "DevOps & Containers", versionCmd: "git --version", description: "Distributed version control system" },
-        { name: "gh", displayName: "GitHub CLI", category: "DevOps & Containers", versionCmd: "gh --version", description: "GitHub on the command line" },
+        { name: "bun", displayName: "Bun", category: "Runtimes & Compilers", versionCmd: "bun -v", description: "All-in-one JavaScript runtime" },
+
+        // DevOps & Containers
         { name: "docker", displayName: "Docker", category: "DevOps & Containers", versionCmd: "docker --version", description: "Container platform" },
         { name: "podman", displayName: "Podman", category: "DevOps & Containers", versionCmd: "podman --version", description: "Daemonless container engine" },
-        { name: "hermes", displayName: "Hermes Agent", category: "AI & Agents", versionCmd: "hermes --version", description: "Autonomous AI agent runtime" },
-        { name: "claude", displayName: "Claude Code", category: "AI & Agents", versionCmd: "claude --version", description: "Anthropic Claude coding agent" },
-        { name: "codex", displayName: "OpenAI Codex CLI", category: "AI & Agents", versionCmd: "codex --version", description: "OpenAI Codex coding assistant" },
-        { name: "pi", displayName: "Pi Agent", category: "AI & Agents", versionCmd: "pi --version", description: "Minimal terminal coding harness" },
-        { name: "ollama", displayName: "Ollama", category: "AI & Agents", versionCmd: "ollama --version", description: "Run local LLMs on your machine" },
+        { name: "git", displayName: "Git", category: "DevOps & Containers", versionCmd: "git --version", description: "Distributed version control system" },
+        { name: "gh", displayName: "GitHub CLI", category: "DevOps & Containers", versionCmd: "gh --version", description: "GitHub on the command line" },
+
+        // Package Managers
+        { name: "npm", displayName: "npm", category: "Package Managers", versionCmd: "npm -v", description: "Node package manager" },
+        { name: "pnpm", displayName: "pnpm", category: "Package Managers", versionCmd: "pnpm -v", description: "Fast package manager" },
+        { name: "yarn", displayName: "Yarn", category: "Package Managers", versionCmd: "yarn -v", description: "JavaScript package manager" },
+        { name: "pip", displayName: "pip", category: "Package Managers", versionCmd: "pip --version", description: "Python package installer" },
+        { name: "cargo", displayName: "Cargo", category: "Package Managers", versionCmd: "cargo --version", description: "Rust package manager" },
       ];
 
       for (const tool of localTools) {
@@ -519,11 +572,15 @@ export default async function plugin(bb: BbPluginApi) {
             const rawVer = execSync(tool.versionCmd, {
               encoding: "utf8",
               timeout: 1000,
-              stdio: ["pipe", "pipe", "ignore"],
+              stdio: ["pipe", "pipe", "pipe"],
             }).trim();
-            version = rawVer.split("\n")[0].replace(/^v/i, "").trim();
-          } catch {
-            version = "Detected";
+            version = rawVer.split("\n")[0].replace(/^v/i, "").replace(/^version:\s*/i, "").trim();
+          } catch (e: any) {
+            if (e?.stdout) {
+              version = e.stdout.trim().split("\n")[0].replace(/^v/i, "").trim();
+            } else {
+              version = "Detected";
+            }
           }
 
           apps.push({
@@ -636,7 +693,6 @@ export default async function plugin(bb: BbPluginApi) {
     const repos: RepoInfo[] = [];
     const seenPaths = new Set<string>();
 
-    // 1. Query BB SDK's discovered repos for any host
     try {
       const disc = await bb.sdk.hosts.experimental_discoverRepos({ hostId });
       for (const r of disc.repos || []) {
@@ -666,7 +722,6 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`experimental_discoverRepos failed for ${hostId}: ${e}`);
     }
 
-    // 2. If Linux host / Decrux host, scan workspace & Code directories for all git repos
     const localId = await getLocalHostId();
     const isThisHost = isDecruxLinux(hostId) || (localId !== null && hostId === localId);
     if (isThisHost) {
@@ -690,7 +745,6 @@ export default async function plugin(bb: BbPluginApi) {
       }
     }
 
-    // Sort: forks and recently active repos first
     repos.sort((a, b) => {
       if (a.isFork !== b.isFork) return a.isFork ? -1 : 1;
       return a.name.localeCompare(b.name);
@@ -754,7 +808,7 @@ export default async function plugin(bb: BbPluginApi) {
         const data = await listWorktrees(hostId);
         if (isJson) return { exitCode: 0, stdout: JSON.stringify(data.worktrees, null, 2) };
         const lines = data.worktrees.map(
-          (w) => `  [${w.kind === "thread_environment" ? "AGENT WORKSPACE" : "GIT WORKTREE"}] ${w.name}\n      host: ${w.hostName} (${w.hostId})\n      path: ${w.path}\n      branch: ${w.branch || "none"}`
+          (w) => `  [${w.harness || w.kind}] ${w.name}\n      host: ${w.hostName} (${w.hostId})\n      path: ${w.path}\n      branch: ${w.branch || "none"}`
         );
         return { exitCode: 0, stdout: `Worktrees (${data.worktrees.length} found):\n${lines.join("\n")}\n` };
       }

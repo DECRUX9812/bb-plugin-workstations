@@ -61,6 +61,7 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
   const [loadingRepos, setLoadingRepos] = useState(false);
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [loadingApps, setLoadingApps] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState<string>("All");
 
   // 1. Initial Load: Workstations & Worktrees
   const loadInitialData = useCallback(async () => {
@@ -317,16 +318,42 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
                 <select
                   value={selectedWorktreeId}
                   onChange={(e) => onSelectWorktree(e.target.value)}
-                  className="h-7 rounded-md border border-border bg-background px-2 text-xs font-medium text-foreground focus:outline-none focus:ring-1 focus:ring-primary max-w-[260px] truncate"
+                  className="h-7 rounded-md border border-border bg-background px-2 text-xs font-medium text-foreground focus:outline-none focus:ring-1 focus:ring-primary max-w-[280px] truncate"
                 >
                   <option value="custom">📁 Custom Folder...</option>
-                  <optgroup label="Agent Workspaces & Repos">
-                    {worktrees.map((wt) => (
-                      <option key={wt.id} value={wt.id}>
-                        {wt.name} ({wt.hostName})
-                      </option>
-                    ))}
-                  </optgroup>
+                  {worktrees.filter((w) => w.kind === "thread_environment").length > 0 && (
+                    <optgroup label="⚡ BB Agent Workspaces">
+                      {worktrees
+                        .filter((w) => w.kind === "thread_environment")
+                        .map((wt) => (
+                          <option key={wt.id} value={wt.id}>
+                            {wt.name} ({wt.hostName})
+                          </option>
+                        ))}
+                    </optgroup>
+                  )}
+                  {worktrees.filter((w) => w.kind === "factory_worktree").length > 0 && (
+                    <optgroup label="🏭 Factory / Droid Worktrees">
+                      {worktrees
+                        .filter((w) => w.kind === "factory_worktree")
+                        .map((wt) => (
+                          <option key={wt.id} value={wt.id}>
+                            {wt.name} ({wt.branch || "main"})
+                          </option>
+                        ))}
+                    </optgroup>
+                  )}
+                  {worktrees.filter((w) => w.kind === "git_worktree").length > 0 && (
+                    <optgroup label="🔱 Git Worktrees & Repos">
+                      {worktrees
+                        .filter((w) => w.kind === "git_worktree")
+                        .map((wt) => (
+                          <option key={wt.id} value={wt.id}>
+                            {wt.name} ({wt.hostName})
+                          </option>
+                        ))}
+                    </optgroup>
+                  )}
                 </select>
               </div>
 
@@ -595,11 +622,37 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
         {/* TAB 3: APPS & TOOLS */}
         {activeTab === "apps" && (
           <div className="flex h-full flex-col overflow-y-auto p-4 md:p-6">
-            <div className="mb-4">
-              <h3 className="font-bold text-base">Installed Tools & Developer Runtimes</h3>
-              <p className="text-xs text-muted-foreground">
-                AI coding agents and programming environments detected on {activeHost?.name || "selected machine"}.
-              </p>
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <div>
+                <h3 className="font-bold text-base">Installed Tools & Developer Runtimes</h3>
+                <p className="text-xs text-muted-foreground">
+                  AI coding agents and programming environments detected on {activeHost?.name || "selected machine"}.
+                </p>
+              </div>
+
+              {/* Category Pills */}
+              <div className="flex flex-wrap gap-1">
+                {[
+                  "All",
+                  "AI Harnesses & Agents",
+                  "Runtimes & Compilers",
+                  "DevOps & Containers",
+                  "Package Managers",
+                ].map((cat) => (
+                  <button
+                    key={cat}
+                    onClick={() => setSelectedCategory(cat)}
+                    className={cn(
+                      "rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
+                      selectedCategory === cat
+                        ? "bg-primary text-primary-foreground font-semibold"
+                        : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                    )}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {loadingApps ? (
@@ -609,7 +662,16 @@ export function WorkstationsExplorer({ variant = "page" }: { variant?: "page" | 
               </div>
             ) : (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {apps.map((app) => (
+                {apps
+                  .filter((app) => {
+                    if (selectedCategory !== "All" && app.category !== selectedCategory) return false;
+                    return true;
+                  })
+                  .sort((a, b) => {
+                    if (a.installed !== b.installed) return a.installed ? -1 : 1;
+                    return a.displayName.localeCompare(b.displayName);
+                  })
+                  .map((app) => (
                   <div
                     key={app.name}
                     className={cn(
